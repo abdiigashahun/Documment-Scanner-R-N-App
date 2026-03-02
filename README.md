@@ -33,31 +33,45 @@ All actions are non-functional placeholders; this project is only the UI shell.
    npx expo start
    ```
 
-3. Build and run with a development build (`npx expo run:android` or `npx expo run:ios`).
+3. Open the app in an emulator or on a physical device via Expo Go.
 
-### Google ML Kit setup (required for document analysis)
+### Tesseract OCR setup (required for document analysis)
 
-This app now uses on-device OCR with Google ML Kit (`react-native-mlkit-ocr`), so no API key is required.
-
-Because this is a native module, use an Expo development build (Expo Go will not load this module).
-
-1. Generate native projects:
+Create a `.env` file in the project root and add:
 
 ```bash
-npx expo prebuild
+EXPO_PUBLIC_OCR_SPACE_API_KEY=your_ocr_space_api_key
 ```
 
-2. Run Android build:
+Notes:
+- OCR uses **Tesseract.js** directly on Expo Web.
+- On iOS/Android in Expo Go, the app uses OCR.Space with **Tesseract engine** (`OCREngine=2`) as fallback.
+- If no key is set, the app falls back to OCR.Space demo key (`helloworld`) with strict limits.
 
-```bash
-npx expo run:android
-```
+Then restart Expo (`npx expo start -c`) so the env variable is loaded.
 
-3. For iOS (macOS only), install pods then run:
+### Post-scan editor
 
-```bash
-npx expo run:ios
-```
+After OCR preview appears:
 
-The analyzer returns `document_type`, `language`, `tags`, `fields`, and `summary` using OCR text + local heuristics.
+- Tap **Edit** to open the full document editor.
+- Update template rows (passport/invoice/etc), body text, and tags.
+- Use style controls (bold/italic/underline, alignment, font size) with live preview.
+- Tap **Apply** to return to scan preview, then **Export**.
+
+### Export formats
+
+From scan preview, choose your preferred export format, then tap **Export**.
+
+Supported formats:
+- **PDF**
+- **DOC**
+- **JPG**
+- **PNG**
+- **TXT**
+- **JSON**
+
+After export, the app opens the system share sheet (when available) so you can send or save the file.
+
+On Android, you can also tap **Export to Files** to choose a folder in Android File Manager and save the exported file directly there.
 

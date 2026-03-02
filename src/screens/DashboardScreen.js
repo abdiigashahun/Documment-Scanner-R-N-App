@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import {
+  Platform,
   View,
   Text,
   StyleSheet,
@@ -12,7 +13,44 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as DocumentPicker from 'expo-document-picker';
-import { analyzeDocumentImage } from '../api/mlkitClient';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
+import { analyzeDocumentImage } from '../api/tesseractClient';
+import { exportDocument, SUPPORTED_EXPORT_FORMATS } from '../api/documentExportClient';
+import DocumentEditorScreen from './DocumentEditorScreen';
+
+const getMimeTypeForFormat = (format) => {
+  if (format === 'pdf') return 'application/pdf';
+  if (format === 'doc') return 'application/msword';
+  if (format === 'jpg') return 'image/jpeg';
+  if (format === 'png') return 'image/png';
+  if (format === 'txt') return 'text/plain';
+  if (format === 'json') return 'application/json';
+  return 'application/octet-stream';
+};
+
+const toFieldKey = (label) =>
+  String(label || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+const createEditorDocument = (analysis) => {
+  if (!analysis) return null;
+
+  const rows =
+    analysis.formatted_output?.rows ||
+    Object.entries(analysis.fields || {}).map(([key, value]) => [key, String(value || '')]);
+
+  return {
+    ...analysis,
+    formatted_output: {
+      title: analysis.formatted_output?.title || 'Document Preview',
+      rows,
+    },
+  };
+};
 
 const DashboardScreen = () => {
   const [cameraVisible, setCameraVisible] = useState(false);
@@ -23,21 +61,92 @@ const DashboardScreen = () => {
   const [analysis, setAnalysis] = useState(null);
   const [analysisError, setAnalysisError] = useState(null);
   const [previewVisible, setPreviewVisible] = useState(false);
+  const [sourceFile, setSourceFile] = useState(null);
+  const [saveMessage, setSaveMessage] = useState(null);
+  const [selectedExportFormat, setSelectedExportFormat] = useState('pdf');
+  const [editorVisible, setEditorVisible] = useState(false);
+  const [editorDocument, setEditorDocument] = useState(null);
 
-  const runAnalysis = async (uri, mimeType) => {
+  const runAnalysis = async (uri, mimeType, fileName) => {
     try {
       setAnalyzing(true);
       setAnalysisError(null);
       setAnalysis(null);
+      setSaveMessage(null);
       setPreviewVisible(true);
+      setSourceFile({ uri, mimeType, fileName });
 
-      const result = await analyzeDocumentImage({ uri, mimeType });
+      const result = await analyzeDocumentImage({ uri, mimeType, fileName });
       setAnalysis(result);
     } catch (err) {
       console.error('Document analysis failed', err);
       setAnalysisError(err.message || 'Document analysis failed.');
     } finally {
       setAnalyzing(false);
+    }
+  };
+
+  const handleExportDocument = async () => {
+    if (!analysis) return;
+
+    try {
+      const exported = await exportDocument({
+        analysis,
+        sourceFile,
+        format: selectedExportFormat,
+      });
+
+      setSaveMessage(`Exported as ${selectedExportFormat.toUpperCase()}: ${exported.fileName}`);
+
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(exported.uri);
+      }
+    } catch (err) {
+      console.error('Failed to export document', err);
+      setSaveMessage(err.message || 'Failed to export document.');
+    }
+  };
+
+  const handleExportToAndroidFiles = async () => {
+    if (!analysis) return;
+
+    if (Platform.OS !== 'android') {
+      setSaveMessage('Android File Manager export is available only on Android.');
+      return;
+    }
+
+    try {
+      const exported = await exportDocument({
+        analysis,
+        sourceFile,
+        format: selectedExportFormat,
+      });
+
+      const permission = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+      if (!permission.granted) {
+        setSaveMessage('Export created, but folder access was not granted.');
+        return;
+      }
+
+      const base64 = await FileSystem.readAsStringAsync(exported.uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      const destinationUri = await FileSystem.StorageAccessFramework.createFileAsync(
+        permission.directoryUri,
+        exported.fileName,
+        getMimeTypeForFormat(exported.format)
+      );
+
+      await FileSystem.writeAsStringAsync(destinationUri, base64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      setSaveMessage(`Saved to Android File Manager: ${exported.fileName}`);
+    } catch (err) {
+      console.error('Failed to export to Android File Manager', err);
+      setSaveMessage(err.message || 'Failed to export to Android File Manager.');
     }
   };
 
@@ -58,7 +167,7 @@ const DashboardScreen = () => {
     setCameraVisible(false);
 
     // Assume JPEG for camera captures.
-    runAnalysis(photo.uri, 'image/jpeg');
+    runAnalysis(photo.uri, 'image/jpeg', 'camera-capture.jpg');
   };
 
   const handlePickDocument = async () => {
@@ -73,8 +182,33 @@ const DashboardScreen = () => {
 
     if (file?.uri) {
       const mimeType = file.mimeType || 'image/jpeg';
-      runAnalysis(file.uri, mimeType);
+      runAnalysis(file.uri, mimeType, file.name);
     }
+  };
+
+  const handleOpenEditor = () => {
+    if (!analysis) return;
+    setEditorDocument(createEditorDocument(analysis));
+    setEditorVisible(true);
+  };
+
+  const handleApplyEditor = (editedDocument) => {
+    const rows = editedDocument?.formatted_output?.rows || [];
+    const nextFields = { ...(analysis?.fields || {}) };
+
+    rows.forEach(([label, value]) => {
+      const key = toFieldKey(label);
+      if (!key) return;
+      nextFields[key] = value;
+    });
+
+    setAnalysis({
+      ...analysis,
+      ...editedDocument,
+      fields: nextFields,
+      tags: Array.isArray(editedDocument?.tags) ? editedDocument.tags : analysis?.tags || [],
+    });
+    setEditorVisible(false);
   };
 
   let cameraRefLocal = null;
@@ -162,7 +296,7 @@ const DashboardScreen = () => {
 
         <View style={styles.footer}>
           <Text style={styles.footerText}>
-            Camera, upload, and AI-powered text extraction are enabled. Preview the structured
+            Camera, upload, and OCR-based text extraction are enabled. Preview the structured
             output before saving.
           </Text>
         </View>
@@ -213,7 +347,7 @@ const DashboardScreen = () => {
             {analyzing && (
               <View style={styles.previewLoading}>
                 <ActivityIndicator color="#22c55e" />
-                <Text style={styles.previewLoadingText}>Extracting text with Google ML Kit…</Text>
+                <Text style={styles.previewLoadingText}>Extracting text with Tesseract.js…</Text>
               </View>
             )}
 
@@ -225,6 +359,20 @@ const DashboardScreen = () => {
 
             {!analyzing && analysis && (
               <ScrollView style={styles.previewScroll} showsVerticalScrollIndicator={false}>
+                {analysis.formatted_output?.rows?.length > 0 && (
+                  <View style={styles.previewTemplateCard}>
+                    <Text style={styles.previewTemplateTitle}>
+                      {analysis.formatted_output.title || 'Structured Preview'}
+                    </Text>
+                    {analysis.formatted_output.rows.map(([label, value]) => (
+                      <View key={`${label}-${value}`} style={styles.previewTemplateRow}>
+                        <Text style={styles.previewTemplateKey}>{label}</Text>
+                        <Text style={styles.previewTemplateValue}>{value || '-'}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+
                 <View style={styles.previewSection}>
                   <Text style={styles.previewSectionLabel}>Document type</Text>
                   <Text style={styles.previewSectionValue}>
@@ -275,23 +423,85 @@ const DashboardScreen = () => {
 
             <View style={styles.previewActions}>
               <TouchableOpacity
+                style={styles.previewEditButton}
+                activeOpacity={0.7}
+                disabled={!analysis || analyzing || !!analysisError}
+                onPress={handleOpenEditor}
+              >
+                <Text style={styles.previewEditText}>Edit</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
                 style={styles.previewCancelButton}
                 activeOpacity={0.7}
-                onPress={() => setPreviewVisible(false)}
+                onPress={() => {
+                  setSaveMessage(null);
+                  setPreviewVisible(false);
+                }}
               >
                 <Text style={styles.previewCancelText}>Discard</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.previewSaveButton}
+                style={[
+                  styles.previewSaveButton,
+                  (!analysis || analyzing || !!analysisError) && styles.previewSaveButtonDisabled,
+                ]}
                 activeOpacity={0.7}
-                onPress={() => setPreviewVisible(false)}
+                disabled={!analysis || analyzing || !!analysisError}
+                onPress={handleExportDocument}
               >
-                <Text style={styles.previewSaveText}>Save</Text>
+                <Text style={styles.previewSaveText}>Export</Text>
               </TouchableOpacity>
+              {Platform.OS === 'android' && (
+                <TouchableOpacity
+                  style={[
+                    styles.previewFilesButton,
+                    (!analysis || analyzing || !!analysisError) && styles.previewSaveButtonDisabled,
+                  ]}
+                  activeOpacity={0.7}
+                  disabled={!analysis || analyzing || !!analysisError}
+                  onPress={handleExportToAndroidFiles}
+                >
+                  <Text style={styles.previewFilesText}>Export to Files</Text>
+                </TouchableOpacity>
+              )}
             </View>
+
+            {!analyzing && !analysisError && analysis && (
+              <View style={styles.exportFormatsWrap}>
+                <Text style={styles.exportFormatsLabel}>Export format</Text>
+                <View style={styles.exportFormatRow}>
+                  {SUPPORTED_EXPORT_FORMATS.map((format) => {
+                    const active = selectedExportFormat === format;
+                    return (
+                      <TouchableOpacity
+                        key={format}
+                        style={[styles.exportFormatChip, active && styles.exportFormatChipActive]}
+                        onPress={() => setSelectedExportFormat(format)}
+                        activeOpacity={0.8}
+                      >
+                        <Text
+                          style={[styles.exportFormatChipText, active && styles.exportFormatChipTextActive]}
+                        >
+                          {format.toUpperCase()}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
+
+            {!!saveMessage && <Text style={styles.previewInfoText}>{saveMessage}</Text>}
           </View>
         </View>
       </Modal>
+
+      <DocumentEditorScreen
+        visible={editorVisible}
+        initialDocument={editorDocument}
+        onCancel={() => setEditorVisible(false)}
+        onApply={handleApplyEditor}
+      />
     </SafeAreaView>
   );
 };
@@ -572,6 +782,37 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '500',
   },
+  previewTemplateCard: {
+    borderWidth: 1,
+    borderColor: '#14532d',
+    backgroundColor: '#052e16',
+    borderRadius: 12,
+    padding: 10,
+    marginBottom: 12,
+  },
+  previewTemplateTitle: {
+    color: '#bbf7d0',
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  previewTemplateRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+    gap: 10,
+  },
+  previewTemplateKey: {
+    color: '#86efac',
+    fontSize: 12,
+    flex: 1,
+  },
+  previewTemplateValue: {
+    color: '#dcfce7',
+    fontSize: 12,
+    flex: 1,
+    textAlign: 'right',
+  },
   previewSummary: {
     color: '#e5e7eb',
     fontSize: 13,
@@ -623,16 +864,81 @@ const styles = StyleSheet.create({
     color: '#e5e7eb',
     fontSize: 13,
   },
+  previewEditButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#14532d',
+  },
+  previewEditText: {
+    color: '#86efac',
+    fontSize: 13,
+    fontWeight: '600',
+  },
   previewSaveButton: {
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 999,
     backgroundColor: '#22c55e',
   },
+  previewSaveButtonDisabled: {
+    opacity: 0.45,
+  },
   previewSaveText: {
     color: '#022c22',
     fontSize: 13,
     fontWeight: '600',
+  },
+  previewFilesButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#1f2937',
+  },
+  previewFilesText: {
+    color: '#e5e7eb',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  previewInfoText: {
+    color: '#86efac',
+    fontSize: 12,
+    marginTop: 10,
+    textAlign: 'center',
+  },
+  exportFormatsWrap: {
+    marginTop: 12,
+  },
+  exportFormatsLabel: {
+    color: '#9ca3af',
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  exportFormatRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  exportFormatChip: {
+    borderWidth: 1,
+    borderColor: '#374151',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  exportFormatChipActive: {
+    borderColor: '#22c55e',
+    backgroundColor: '#052e16',
+  },
+  exportFormatChipText: {
+    color: '#9ca3af',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  exportFormatChipTextActive: {
+    color: '#86efac',
   },
 });
 

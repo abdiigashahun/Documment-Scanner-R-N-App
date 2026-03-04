@@ -1,4 +1,4 @@
-## Document Scanner (Expo SDK 54)
+### Document Scanner (Expo SDK 54)
 
 Simple React Native + Expo frontend-only document scanner UI.
 
